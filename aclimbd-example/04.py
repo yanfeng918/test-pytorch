@@ -1,67 +1,47 @@
-#已经实现了基础bert和全连接层的组合使用；
-#并且保存了这两个模型
-#并且修改了代码，加载保存的模型，进行验证
 
+#在验证集上面，进行加载训练好的模型进行验证；
 from transformers import BertModel, BertTokenizer
-
-import torch.nn as nn
-from transformers import AutoTokenizer, AutoModelForSequenceClassification,BertConfig
 import torch
 import logging
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-import csv
-from torch.utils.data import DataLoader,dataset
-import time
 import torch.nn.functional as F
+import torch.nn as nn
+import time
+
 from tqdm import tqdm
-
-# tokenizer = AutoTokenizer.from_pretrained("bert-base-cased-finetuned-mrpc")
-# model = AutoModelForSequenceClassification.from_pretrained("bert-base-cased-finetuned-mrpc")
-
-
-MODEL_PATH = "../bert-base-uncased/"
-# a.通过词典导入分词器
-tokenizer = BertTokenizer.from_pretrained(r"../bert-base-uncased/vocab.txt")
-# b. 导入配置文件
-model_config = BertConfig.from_pretrained("../bert-base-uncased/config.json")
-# 修改配置
-model_config.output_hidden_states = True
-model_config.output_attentions = True
-# 通过配置和路径导入模型
-model = BertModel.from_pretrained(MODEL_PATH,config = model_config)
-
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model.to(device)
 
 log = logging.getLogger(__name__)
 log.info('start data preparing...')
 
-def _read_tsv(input_file, quotechar=None):
-    """Reads a tab separated value file."""
-    with open(input_file, 'r') as file:
-        reader = csv.reader(file, delimiter="\t", quotechar=quotechar)
-        lines = []
-        for line in reader:
-            lines.append(line)
-        return lines
+output_dir = "./aclimdb_result/"
+# Bert模型示例
+model = BertModel.from_pretrained(output_dir)
+tokenizer = BertTokenizer.from_pretrained(output_dir)  # Add specific options if needed
 
-tsv = _read_tsv('../data/MRPC/train.tsv')
-del(tsv[0])
-train_texts_a = [item[3] for item in tsv]
-train_texts_b = [item[4] for item in tsv]
+from pathlib import Path
 
-train_labels = [int(item[0]) for item in tsv]
-print(train_texts_a[0])
+def read_imdb_split(split_dir):
+    split_dir = Path(split_dir)
+    texts = []
+    labels = []
+    for label_dir in ["pos", "neg"]:
+        for text_file in (split_dir/label_dir).iterdir():
+            texts.append(text_file.read_text())
+            labels.append(0 if label_dir == "neg" else 1)
 
-tsv_test = _read_tsv('../data/MRPC/train.tsv')
-del(tsv_test[0])
-test_texts_a = [item[3] for item in tsv_test]
-test_texts_b = [item[4] for item in tsv_test]
+    return texts, labels
 
-test_labels = [int(item[0]) for item in tsv_test]
+train_texts, train_labels = read_imdb_split('../data/aclImdb/train')
+test_texts, test_labels = read_imdb_split('../data/aclImdb/test')
 
-train_encodings = tokenizer(train_texts_a, train_texts_b, truncation=True, padding=True)
-test_encodings = tokenizer(test_texts_a, test_texts_b, truncation=True, padding=True)
+
+from sklearn.model_selection import train_test_split
+train_texts, val_texts, train_labels, val_labels = train_test_split(train_texts, train_labels, test_size=.2)
+
+
+train_encodings = tokenizer(train_texts, truncation=True, padding=True,max_length=512)
+val_encodings = tokenizer(val_texts, truncation=True, padding=True,max_length=512)
+test_encodings = tokenizer(test_texts, truncation=True, padding=True,max_length=512)
+
 
 class IMDbDataset(torch.utils.data.Dataset):
     def __init__(self, encodings, labels):
@@ -77,19 +57,24 @@ class IMDbDataset(torch.utils.data.Dataset):
         return len(self.labels)
 
 train_dataset = IMDbDataset(train_encodings, train_labels)
+val_dataset = IMDbDataset(val_encodings, val_labels)
 test_dataset = IMDbDataset(test_encodings, test_labels)
 
+from torch.utils.data import DataLoader
+from transformers import DistilBertForSequenceClassification, AdamW
 
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-optimizer = torch.optim.AdamW(params=model.parameters(), lr=1e-5)
+# model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased')
+model.to(device)
+model.train()
 
-
-batch_size =32
-# test_dataset = IMDbDataset(test_encodings, test_labels)
+batch_size =4
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
 class Bert_Fc_Model(nn.Module):
     def __init__(self):
-        print("init________")
         super(Bert_Fc_Model, self).__init__()
         self.model = model
         self.tokenizer = tokenizer
@@ -98,58 +83,30 @@ class Bert_Fc_Model(nn.Module):
 
     def forward(self, input_ids,attention_mask,token_type_ids):
         out = model(input_ids, attention_mask, token_type_ids)
-        # out = input_str
-        # print("out.size() = ", out.size())
-        # out_0 = out[0]
-        # print("out[0].size() = ",out_0.size())
-        # out_0 = self.dropout(out_0)
-        # print("out[0].size() = ",out_0.size())
-        #
-        # out = out[1]
-        # print("out[1].size() = ", out.size())
-        # batch*seqs*hidden
         out = self.dropout(out[0])
         pooled = F.avg_pool2d(out, (out.shape[1], 1)).squeeze(1)  # [batch size, embedding_dim]
         out = self.fc(pooled)
         return out
 
 bert_model = Bert_Fc_Model()
-# bert_model.train().to(device)
-
-# print(bert_model)
-
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
 
 def train():
 
     criterion = nn.CrossEntropyLoss()
-    # criterion = nn.BCEWithLogitsLoss()
     optim = torch.optim.AdamW(bert_model.parameters(), lr=5e-5)
     correct_number = 0
     time_start = time.time()  # 开始时间
 
     correct_total_number =0
-    for epoch in range(10):
+    for epoch in range(3):
         for i, batch in enumerate(tqdm(train_loader)):
-            batch = {k: v.to(device) for k, v in batch.items()}
-            label = batch["labels"]
-
+            # batch = {k: v.to(device) for k, v in batch.items()}
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             token_type_ids = batch["token_type_ids"].to(device)
             label = batch['labels'].to(device)
             out = bert_model(input_ids, attention_mask=attention_mask, token_type_ids = token_type_ids)
-            # batch.pop("labels")
-            # outputs = model(**batch)
-            # loss = outputs[0]
-            # loss.backward()
-            # optimizer.step()
-            # optimizer.zero_grad()
-            # if i % 10 == 0:
-            #     print(f"loss: {loss}")
-            #print("out = ",out)
-            #         print("out = ",out)
             # 清零梯度
             optim.zero_grad()
             loss = F.cross_entropy(out, label)
@@ -173,22 +130,16 @@ def train():
         print("总耗时：", time.time() - time_start)
         correct_total_number=0
 
-    save_directory = "./mrpc/"
+    save_directory = "./aclimdb_result/"
     tokenizer.save_pretrained(save_directory)
     model.save_pretrained(save_directory)
-
-    torch.save(bert_model.state_dict(), "./mrpc/embedding-{}.th".format(756))
-    torch.save(bert_model.state_dict(), "./embedding-{}.th".format(756))
+    torch.save(bert_model.state_dict(), "./aclimdb_result/embedding-{}.th".format(756))
     # model.load_state_dict(torch.load("embedding-{}.th".format(EMBEDDING_SIZE)))
-
 
 def eval():
     correct_total_number =0
-    output_dir = "./mrpc/"
-    # Bert模型示例
-    model = BertModel.from_pretrained(output_dir)
-    tokenizer = BertTokenizer.from_pretrained(output_dir)  # Add specific options if needed
-    bert_model.load_state_dict(torch.load("embedding-{}.th".format(756)))
+
+    bert_model.load_state_dict(torch.load("./aclimdb_result/embedding-{}.th".format(756)))
 
     bert_model.eval().to(device)
 
@@ -204,5 +155,7 @@ def eval():
 
     print("acc = ", correct_total_number / len(train_dataset))
 
+
 if __name__ == "__main__":
     eval()
+

@@ -10,7 +10,7 @@ model_config.output_attentions = True
 # 通过配置和路径导入模型
 model = transformers.BertModel.from_pretrained(MODEL_PATH,config = model_config)
 # print(model)
-
+print(model.config)
 
 paraphrase = tokenizer("hello wrold", return_tensors="pt")
 

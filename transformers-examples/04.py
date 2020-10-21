@@ -10,6 +10,7 @@ import logging
 import csv
 
 
+
 output_dir = "./save3/"
 #Bert模型示例
 model = BertForSequenceClassification.from_pretrained(output_dir)
